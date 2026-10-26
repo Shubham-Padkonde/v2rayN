@@ -1,0 +1,48 @@
+name: Profile persistence validation
+on:
+  push:
+    branches: [ci/profile-test-results]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: '10.x'
+      - name: Full service tests
+        run: dotnet test --project ./v2rayN/ServiceLib.Tests -c Release --results-directory ./fixed-results -- --report-trx
+      - name: Verify regressions against unchanged production code
+        shell: bash
+        run: |
+          git restore --source=57f17d5939e88c8e643ab49b90869d637765e75a -- v2rayN/ServiceLib/Helper/SqliteHelper.cs v2rayN/ServiceLib/Manager/ProfileExManager.cs
+          set +e
+          dotnet test --project ./v2rayN/ServiceLib.Tests -c Release --results-directory ./baseline-results -- --treenode-filter '/*/*/ProfileExManagerPersistenceTests/*' --report-trx > baseline.log 2>&1
+          result=$?
+          set -e
+          cat baseline.log
+          test "$result" -eq 2
+          python3 - <<'PY'
+          import glob
+          import xml.etree.ElementTree as ET
+          files = glob.glob('baseline-results/*.trx')
+          assert len(files) == 1, files
+          root = ET.parse(files[0]).getroot()
+          results = root.findall('.//{*}UnitTestResult')
+          assert len(results) == 2, len(results)
+          assert all(r.attrib['outcome'] == 'Failed' for r in results)
+          assert {r.attrib['testName'] for r in results} == {
+              'SaveTo_NewProfilesWithRepeatedResults_ShouldPersistEveryProfile',
+              'SaveTo_MixedNewAndExistingProfiles_ShouldInsertAndUpdateResults',
+          }
+          PY
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: profile-persistence-results
+          path: |
+            fixed-results/
+            baseline-results/
+            baseline.log
